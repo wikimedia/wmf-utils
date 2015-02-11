@@ -1,0 +1,101 @@
+#!/usr/bin/env python
+import os
+import re
+import subprocess
+import sys
+import argparse
+import logging
+import urlparse
+
+log = logging.getLogger(__name__)
+
+GERRIT_HTTPS = 'gerrit.wikimedia.org'
+GERRIT_SSH = 'gerrit.wikimedia.org:29418'
+
+
+def _repo_name(repo):
+    """Parse a (potential) gerrit URL and return repo name."""
+    if repo.startswith('ssh') or repo.startswith('http'):
+        split = urlparse.urlsplit(repo)
+        return re.sub('/r/', '', split.path)
+    else:
+        return repo.strip('/')
+
+
+def _install_gerrit_hook(gerrit, repo_dir):
+    gerrit_url = 'https://{}/r/tools/hooks/commit-msg'.format(gerrit)
+    hook_setup_cmd = 'curl -Ls {} > ' \
+                     '{}/.git/hooks/commit-msg'.format(gerrit_url, repo_dir)
+    subprocess.check_call(hook_setup_cmd, shell=True)
+    os.chmod(os.path.join(repo_dir, '.git/hooks/commit-msg'), 0755)
+
+
+def _clone_repo(repo_url, repo_push_url, repo_dir):
+    git_cmd = ['git', 'clone']
+    git_cmd.extend(['--config',
+        'remote.origin.pushUrl={}'.format(repo_push_url)])
+    git_cmd.append(repo_url)
+    git_cmd.append(repo_dir)
+    subprocess.check_call(git_cmd)
+
+
+def _config_repo(repo_dir, email, name):
+    opts = {
+        'user.email': email,
+        'user.name': name,
+    }
+
+    for k, v in opts.items():
+        git_cmd = ['git', '--git-dir', os.path.join(repo_dir, '.git')]
+        git_cmd.append('config')
+        git_cmd.extend([k, v])
+        subprocess.check_call(git_cmd)
+
+
+def main():
+    description="""Clone and setup a repository from gerrit.wikimedia.org.
+
+The following enviroment variables can be used:
+    WMF_USER: username used to access gerrit via SSH
+    WMF_EMAIL: email to use in commit messages
+    WMF_FULLNAME: full name to use in commit messages"""
+
+    ap = argparse.ArgumentParser(usage='wmf-clone [-h] repo [directory]',
+            description=description,
+            formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('repo')
+    # HACK, positional arguments can't be optional in argparse :(
+    ap.add_argument('directory', nargs='*')
+    args = ap.parse_args()
+
+    logging.basicConfig(level=logging.INFO)
+
+    user = os.environ.get('WMF_USER', '')
+    email = os.environ.get('WMF_EMAIL', '')
+    name = os.environ.get('WMF_FULLNAME', '')
+    if not email or not name:
+        log.warning('no WMF_EMAIL, WMF_FULLNAME set, cloning anyway')
+    if not user:
+        log.warning('no WMF_USER set, defaulting to %s', os.getlogin())
+        user = os.getlogin()
+
+    repo_path = _repo_name(args.repo)
+    repo_url = 'https://{}/r/{}'.format(GERRIT_HTTPS, repo_path)
+    repo_push_url = 'ssh://{}@{}/{}'.format(user, GERRIT_SSH, repo_path)
+
+    repo_dir = re.sub('.git$', '', os.path.basename(repo_path))
+    if len(args.directory) > 0:
+        repo_dir = args.directory[0]
+
+    git_dir = os.path.join(repo_dir, '.git')
+    if os.path.exists(git_dir):
+        log.error('directory %s already exists, no action', git_dir)
+        return 1
+
+    _clone_repo(repo_url, repo_push_url, repo_dir)
+    _config_repo(repo_dir, email, name)
+    _install_gerrit_hook(GERRIT_HTTPS, repo_dir)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
