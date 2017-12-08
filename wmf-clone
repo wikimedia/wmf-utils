@@ -33,7 +33,7 @@ def _install_gerrit_hook(gerrit, repo_dir):
 def _clone_repo(repo_url, repo_push_url, repo_dir):
     git_cmd = ['git', 'clone']
     git_cmd.extend(['--config',
-        'remote.origin.pushUrl={}'.format(repo_push_url)])
+                    'remote.origin.pushUrl={}'.format(repo_push_url)])
     git_cmd.append(repo_url)
     git_cmd.append(repo_dir)
     subprocess.check_call(git_cmd)
@@ -53,16 +53,17 @@ def _config_repo(repo_dir, email, name):
 
 
 def main():
-    description="""Clone and setup a repository from gerrit.wikimedia.org.
+    description = """Clone and setup a repository from gerrit.wikimedia.org.
 
 The following enviroment variables can be used:
     WMF_USER: username used to access gerrit via SSH
     WMF_EMAIL: email to use in commit messages
     WMF_FULLNAME: full name to use in commit messages"""
 
-    ap = argparse.ArgumentParser(usage='wmf-clone [-h] repo [directory]',
-            description=description,
-            formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        usage='wmf-clone [-h] repo [directory]',
+        description=description,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('repo')
     # HACK, positional arguments can't be optional in argparse :(
     ap.add_argument('directory', nargs='*')
