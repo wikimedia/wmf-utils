@@ -27,7 +27,7 @@ def _install_gerrit_hook(gerrit, repo_dir):
     hook_setup_cmd = 'curl -Ls {} > ' \
                      '{}/.git/hooks/commit-msg'.format(gerrit_url, repo_dir)
     subprocess.check_call(hook_setup_cmd, shell=True)
-    os.chmod(os.path.join(repo_dir, '.git/hooks/commit-msg'), 0755)
+    os.chmod(os.path.join(repo_dir, '.git/hooks/commit-msg'), 0o755)
 
 
 def _clone_repo(repo_url, repo_push_url, repo_dir):
