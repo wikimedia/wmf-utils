@@ -1,0 +1,171 @@
+#!/bin/bash
+
+##############################################################################
+# WMF Update production known hosts
+#
+# DESCRIPTION:
+# - Populate a known_hosts file with all the production hosts and services
+#   in the Wikimedia Foundation production infrastructure for easy
+#   autocompletion while keeping StrictHostKeyChecking active:
+#   - sync all the known hosts from a bastion
+#   - clean the hostname without FQDN in it
+#   - optionally generate known hosts for services defined as CNAMEs in the
+#     DNS repository, see PARAMS below. This allows for the autocompletion of
+#     active/passive services like icinga.wikimedia.org.
+#   - Silently ignore all CNAMEs to the main DYNA record (dyna.wikimedia.org.)
+# - Keeps a backup file with the previous known hosts
+# - Show a diff between the new known hosts and the current ones
+#
+# It saves the known hosts into KNOWN_HOST_FILE, adjust this and/or the
+# UserKnownHostsFile parameter in your ~/.ssh/config in order for them to
+# match. A warning will be shown if they don't match.
+#
+# By default only the hosts from the choosen BASTION_HOST known_hosts file
+# will be imported, cleaning the hostname (not the FQDN) to ease the auto-
+# completion when ssh-ing.
+#
+# PARAMS:
+# It accept one positional argument that, if specified, must be the path to
+# a local clone of the Operations DNS repository, (either from Gerrit or from
+# GitHub):
+#     https://gerrit.wikimedia.org/r/operations/dns
+# In this case also the services defined as CNAMEs in the wikimedia.org and
+# wmnet zone files will be added with the identity of the target host, if
+# that is found in the known_hosts file, skipping the missing ones.
+#
+# USAGE:
+# wmf-update-prod-known-hosts [PATH_TO_DNS_REPOSITORY]
+#
+# Author: Riccardo Coccioli <rcoccioli@wikimedia.org>
+# Date: 2017-06-21
+# Last update: 2019-05-30
+# Dependencies: colordiff
+# Version: 1.1
+# License: GPLv3+
+##############################################################################
+
+set -e
+
+DNS_REPO_PATH="${1}"
+KNOWN_HOSTS_PATH="${HOME}/.ssh/known_hosts.d"
+KNOWN_HOST_FILE="${KNOWN_HOSTS_PATH}/wmf-prod"
+BASTION_HOST="bast2002.wikimedia.org"
+MAIN_DYNA_RECORD="dyna.wikimedia.org."
+
+if [[ ! -d "${KNOWN_HOSTS_PATH}" ]]; then
+    echo "ERROR: KNOWN_HOSTS_PATH '${KNOWN_HOSTS_PATH}' is not a directory, you might want to adjust the constant in the script or create it"
+    exit 1
+fi
+
+if [[ -n "${DNS_REPO_PATH}" ]]; then
+    if [[ ! -d "${DNS_REPO_PATH}" ]]; then
+        echo "ERROR: DNS_REPO_PATH '${DNS_REPO_PATH}' is not a directory"
+        exit 2
+    fi
+    if ! git -C "${DNS_REPO_PATH}" remote -v | egrep '(gerrit.wikimedia.org|github.com\/wikimedia)' | grep -cq 'operations[/-]dns'; then
+        echo "ERROR: DNS_REPO_PATH '${DNS_REPO_PATH}' doesn't seems to be a checkout of the operations/dns repository"
+        exit 3
+    fi
+fi
+
+function parse_line() {
+    local line="${1}"
+    local domain="${2}"
+    local name
+    local target
+    local found
+
+    name="$(echo "${line}" | cut -d' ' -f1)"
+    target="$(echo "${line}" | cut -d' ' -f2)"
+
+    if [[ "${target}" == "${MAIN_DYNA_RECORD}" ]]; then
+        # Silently ignore CNAMEs to the MAIN_DYNA_RECORD
+        return
+    fi
+
+    sep="\."
+    if [[ "${target: -1}" == '.' ]]; then
+        target="${target%?}"
+        sep=","
+    fi
+
+    set +e
+    found=$(grep -c "^${target}${sep}" "${KNOWN_HOST_FILE}.new")
+    set -e
+    if [[ "${found}" -eq "0" || "${found}" -gt "1" ]]; then
+        >&2 echo "Skipping '${target}' CNAME target, found ${found}/1 matches"
+        return
+    fi
+
+    grep "^${target}${sep}" "${KNOWN_HOST_FILE}.new" | awk -v name="${name}" -v domain="${domain}" '{ printf name"."domain; for (i = 2; i <= NF; i++) printf FS$i; print NL }'
+}
+
+function extract_cnames_from_zone() {
+    local zone_file
+    local origin
+    local boundaries
+    local start
+    local end
+    local domain
+
+    zone_file="${1}"
+    if [[ ! -f "${zone_file}" ]]; then
+        >&2 echo "Unable to find zone file ${zone_file}, skipping..."
+        return
+    fi
+
+    origin="${2}"
+    if [[ -n "${origin}" ]]; then
+        boundaries="$(grep -n "\$ORIGIN" "${zone_file}" | grep -A 1 "\$ORIGIN ${origin}\.$")"
+        start=$(echo "${boundaries}" | head -n1 | cut -d':' -f1)
+        end=$(echo "${boundaries}" | tail -n1 | cut -d':' -f1)
+        domain="${origin}"
+
+        head -n "${end}" "${zone_file}" | tail -n "$((end - start))" | awk '/ CNAME / { print $1, $5 }' | while read -r line; do
+            parse_line "${line}" "${domain}" >> "${KNOWN_HOST_FILE}.new"
+        done
+    else
+        domain="$(basename "${zone_file}")"
+        awk '/ CNAME / { print $1, $5 }' "${zone_file}" | while read -r line; do
+            parse_line "${line}" "${domain}" >> "${KNOWN_HOST_FILE}.new"
+        done
+    fi
+}
+
+# Get new known hosts
+echo "===> SSHing to ${BASTION_HOST} (if a smartcard input is needed, check it now)"
+ssh "${BASTION_HOST}" 'cat /etc/ssh/ssh_known_hosts' > "${KNOWN_HOST_FILE}.new"
+
+# Remove the non-FQDN hostnames to avoid multiple autocompletions
+awk -F ',' '{ printf $1; for (i = 3; i <= NF; i++) printf FS$i; print NL }' "${KNOWN_HOST_FILE}.new" > "${KNOWN_HOST_FILE}.new.clean"
+mv -f "${KNOWN_HOST_FILE}.new.clean" "${KNOWN_HOST_FILE}.new"
+
+if [[ -n "${DNS_REPO_PATH}" ]]; then
+    extract_cnames_from_zone "${DNS_REPO_PATH}/templates/wikimedia.org"
+    extract_cnames_from_zone "${DNS_REPO_PATH}/templates/wmnet" "eqiad.wmnet"
+fi
+
+PREV_COUNT=0
+PREV_FILE=/dev/null
+if [[ -f "${KNOWN_HOST_FILE}" ]]; then
+    PREV_COUNT="$(wc -l "${KNOWN_HOST_FILE}")"
+    PREV_FILE="${KNOWN_HOST_FILE}"
+fi
+
+echo "==== DIFFERENCES ===="
+colordiff --fakeexitcode "${PREV_FILE}" "${KNOWN_HOST_FILE}.new"
+echo "====================="
+echo "Going from ${PREV_COUNT} to $(wc -l "${KNOWN_HOST_FILE}.new") known hosts and services"
+
+if [[ -f "${KNOWN_HOST_FILE}" ]]; then
+    mv -vf "${KNOWN_HOST_FILE}" "${KNOWN_HOST_FILE}.old"
+    echo "Backup file is ${KNOWN_HOST_FILE}.old"
+fi
+mv -v "${KNOWN_HOST_FILE}.new" "${KNOWN_HOST_FILE}"
+echo "New file generated at ${KNOWN_HOST_FILE}"
+
+if ! egrep -cq "UserKnownHostsFile .*/wmf-prod( |$)" "${HOME}/.ssh/config"; then
+    echo "WARNING: You may need to add/update 'UserKnownHostsFile ${KNOWN_HOST_FILE}' to your ~/.ssh/config"
+fi
+
+exit 0
